@@ -15,5 +15,7 @@
   thumbnail generation. Clicking a thumbnail will seek directly to that position, thereby
   eliminating the need to do multiple seeks in order to search for the correct position.
   Or even better: create a mini-flash-preview of the whole stream?
-
+* make bit rates configurable via WEB UI. store them in cookies?
+* remember last play position/last active recording via cookie?
+* detect bandwidth problems? auto-adjust bit rates?
 

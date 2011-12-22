@@ -23,7 +23,7 @@ within the VDR recording (001.vdr etc.).
 
 There is a web frontend using DHTML/WebSocket tech needed to start streaming. Start the server with:
 
-MOJO_MODE=development morbo mojo_streamer.pl daemon --listen 'http://*:3001'
+MOJO_MODE=development DEBUG=0 morbo mojo_vdr_streamer.pl daemon --listen 'http://*:3001'
 
 Then go to http://your-ip:3001 to select a VDR recording for streaming.
 Then point your client (mplayer) to http://your-ip:3001/playback. It may take a while before

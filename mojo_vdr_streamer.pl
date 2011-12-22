@@ -1,12 +1,12 @@
 # vim:set sw=4 ts=4 et ai smartindent fileformat=unix fileencoding=utf-8 syntax=perl:
-# MOJO_MODE=development morbo mojo_streamer.pl daemon --listen 'http://*:3001'
+# MOJO_MODE=development DEBUG=0 morbo mojo_vdr_streamer.pl daemon --listen 'http://*:3001'
 # lsof -p`lsof /home/perl/5.14.0/bin/morbo | sort -n -k2 | tail -n1 | awk '{print $2}'` | grep -v " mem "
 package VDR_STREAMER;
 
 BEGIN {
-    unshift @INC, $ENV{HOME}.'/mysvn/scripts/perl';
     # EPOLL (4) is buggy, at least on Ubuntu 11.10/amd64 libev with perl 5.14.0 and EV 4.03.
     $ENV{LIBEV_FLAGS}=3;
+    die 'public/ missing' unless (-d './public');
 }
 
 use strict;
@@ -27,10 +27,7 @@ use Fcntl qw(:DEFAULT);
 use Symbol qw(gensym);
 use IO::Socket;
 use Data::Dumper;
-
-use FindBin;
-use lib $FindBin::Bin.'/../';
-use VDR::Index;
+require 'Index.pm';
 
 app->log->level($ENV{'DEBUG'} ? 'debug' : 'info');
 $EV::DIED = sub { EV::unloop; die @_; };
@@ -48,7 +45,7 @@ our $assumed_mux_overhead_factor = 1.01; # fraction
 our $last_ab = $default_audio_kbit;
 our $last_vb = $default_video_kbit;
 
-our $remote_player_stream = undef; # websocket clients we need to keep up to date with current video-stream info
+our $remote_player_stream = undef; # only one.
 
 our $playback_ffmpeg_pid = undef;
 our $playback_pipe_ffmpeg_stdin = undef;
@@ -70,8 +67,8 @@ our $vdr_src_fh = undef;
 our $w_client = undef;
 our $w_client_read_monitor = undef;
 
-our %ws_clients = ();
-our $current_recording = undef;
+our %ws_clients = (); # websocket clients we need to keep up to date with current video-stream info
+our $current_recording = undef; # which vdr recording are we currently processing?
 
 our %w_evts = ();
 sub w_suspend {
@@ -88,18 +85,10 @@ sub w_resume {
     return if ($w->is_active);
     $w->start;
     if(exists $w_evts{$w}) {
-        $w->feed_event($w_evts{$w});
+        # fixes some issues with EPOLL, but not all...:
+#        $w->feed_event($w_evts{$w});
         delete $w_evts{$w};
     }
-    1
-}
-sub w_clear {
-    my($w) = @_;
-    return unless defined $$w;
-    if(exists $w_evts{$$w}) {
-        delete $w_evts{$$w};
-    }
-    $$w = undef;
     1
 }
 
