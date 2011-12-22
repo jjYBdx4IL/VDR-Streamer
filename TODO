@@ -1,0 +1,19 @@
+= STREAMING =
+
+* faster seeks
+* is there any way to tell (s)mplayer about the duration of the stream?
+* is there any way to make smplayer correctly position the lever on the seek bar?
+* pre-re-compress on the server (server-side caching) and display progress in WEB UI
+
+= WEB UI =
+
+* automatic restore of player when WEB UI is (re)loaded while streaming is in progress.
+* play controls, ie. +/- 10 seconds/1 minute/10 minutes; display of current time position
+  (derived from VDR recording position, which is of course, always a bit early...)
+* seeking: how can we handle the delay arising due to the fact that we only have control
+  over feeding VDR recording as input to ffmpeg better? Idea: ad-hoc high-density
+  thumbnail generation. Clicking a thumbnail will seek directly to that position, thereby
+  eliminating the need to do multiple seeks in order to search for the correct position.
+  Or even better: create a mini-flash-preview of the whole stream?
+
+

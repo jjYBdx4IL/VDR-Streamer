@@ -1,0 +1,67 @@
+Streaming Server for VDR 1.6 *recordings*.
+
+Proof of concept.
+
+Written in perl and using async I/O, ie. event loops.
+
+Only one simultaneous client supported. This is *not* a live-streaming server.
+It re-encodes VDR recordings on-the-fly and the client determines how fast it will re-encode.
+Streaming is done via HTTP and seeking is supported. This is intended to watch one's own
+VDR recording ad-hoc over a slow bandwidth connection.
+
+VDR recordings are expected beneath /vdr.
+
+I have a 100+ kb/s DSL upstream. SD TV re-compressed as h264 and streamed through
+that little upstream bandwidth gives better results than one might first think!
+I have an Intel Core i5 750 with 4 cores. A recent ffmpeg requires less than half of
+that processing power for SD TV content.
+
+The streaming server assumes 25 fps and looks at index.vdr to estimate the byte
+length. The HTTP streaming client then seeks by sending an offset (range), which the server
+translates into a relative position and then restarts re-compression at that translated position
+within the VDR recording (001.vdr etc.).
+
+There is a web frontend using DHTML/WebSocket tech needed to start streaming. Start the server with:
+
+MOJO_MODE=development morbo mojo_streamer.pl daemon --listen 'http://*:3001'
+
+Then go to http://your-ip:3001 to select a VDR recording for streaming.
+Then point your client (mplayer) to http://your-ip:3001/playback. It may take a while before
+mplayer starts the playback.
+
+
+
+The whole beast works with:
+
+Server:
+
+Ubuntu 11.10/amd64. Perl 5.14.0 with recent Mojolicious 2.38 and EV 4.03. 
+
+$ ffmpeg --version
+ffmpeg version git-2011-12-17-9cb6a39, Copyright (c) 2000-2011 the FFmpeg developers
+  built on Dec 17 2011 23:26:19 with gcc 4.6.1
+  configuration: --prefix=/home/build --enable-shared --enable-pic --disable-debug --enable-libx264 --enable-gpl --enable-libmp3lame --extra-libs=-L/home/build/lib --extra-cflags=-I/home/build/include
+  libavutil    51. 32. 0 / 51. 32. 0
+  libavcodec   53. 46. 0 / 53. 46. 0
+  libavformat  53. 26. 0 / 53. 26. 0
+  libavdevice  53.  4. 0 / 53.  4. 0
+  libavfilter   2. 53. 0 /  2. 53. 0
+  libswscale    2.  1. 0 /  2.  1. 0
+  libpostproc  51.  2. 0 / 51.  2. 0
+
+$ x264 --version
+x264 0.120.2 0c7dab9
+(libswscale 2.1.0)
+(libavformat 53.25.0)
+built on Dec 15 2011, gcc: 4.6.1
+configuration: --bit-depth=8 --chroma-format=all
+x264 license: GPL version 2 or later
+libswscale/libavformat license: GPL version 2 or later
+
+Client:
+
+Ubuntu 11.04/amd64. mplayer/smplayer. Seeking does not work with other players, unfortunately.
+
+
+
+

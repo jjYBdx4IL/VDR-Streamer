@@ -1,0 +1,23 @@
+.playsec {
+    background-color: #e0e0e0;
+    font-family: monospace;
+    font-size: 11pt;
+    cursor: pointer;
+}
+.playsec:hover {
+    background-color: #9999ff;
+}
+.playrec {
+    background-color: #f0f0f0;
+    font-family: monospace;
+    font-size: 11pt;
+    cursor: pointer;
+    padding-left: 32px;
+}
+.playrec:hover {
+    background-color: #9999ff;
+}
+pre.playlog {
+    height: 80px;
+    overflow: scroll;
+}
