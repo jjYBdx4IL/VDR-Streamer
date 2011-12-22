@@ -214,7 +214,7 @@ sub start_playback {
             undef $vdr_src_fh;
             $vdr_src_fh = gensym;
             app->log->info('$w_vdr_src: opening '.$current_vdr_src_fn);
-            open $vdr_src_fh, '<:raw', $current_vdr_src_fn or die;
+            sysopen($vdr_src_fh, $current_vdr_src_fn, O_RDONLY | O_NONBLOCK) or die;
             async_fh($vdr_src_fh);
             $rlen = sysread($vdr_src_fh,$buf,$bufsize);
             die $! unless defined $rlen;
