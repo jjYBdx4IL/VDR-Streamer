@@ -180,6 +180,7 @@ function handle_singlepreviewimage (msg) {
         single_preview_pending_picidx = next_single_preview_picidx;
         next_single_preview_picidx = null;
         send({cmd:"loadsinglepreviewimage",picidx:single_preview_pending_picidx,imgwidth:160});
+        setTimeout(function() {single_preview_pending_picidx=null;}, 3000);
     }
 }
 function handle_singlepreviewimagefail (msg) {
@@ -188,6 +189,7 @@ function handle_singlepreviewimagefail (msg) {
         single_preview_pending_picidx = next_single_preview_picidx;
         next_single_preview_picidx = null;
         send({cmd:"loadsinglepreviewimage",picidx:single_preview_pending_picidx,imgwidth:160});
+        setTimeout(function() {single_preview_pending_picidx=null;}, 3000);
     }
 }
 function handle_previewimage (msg) {

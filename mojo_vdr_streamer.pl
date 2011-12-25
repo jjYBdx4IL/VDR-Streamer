@@ -562,6 +562,7 @@ any '/playback' => sub {
     $remote_player_stream->timeout(3600);
     app->log->info($self->req->to_string);
     my $range = $self->req->content->headers->range;
+    my $res = defined $range ? '206' : '200';
     $range //= 0;
     $range = ($range =~ /(\d+)/)[0];
     my $content_length = start_playback($range);
@@ -573,7 +574,15 @@ any '/playback' => sub {
         Mojo::IOLoop->drop(Mojo::IOLoop->stream($remote_player_stream));
         undef $remote_player_stream;
     });
-    $remote_player_stream->write("HTTP/1.0 200 OK\nContent-Type: video/mpeg\nAccept-Ranges: bytes\nContent-Length: $content_length\nConnection: close\n\n");
+    $remote_player_stream->write(
+        "HTTP/1.1 $res OK\n"
+        ."Content-Type: video/mpeg\n"
+        ."Accept-Ranges: bytes\n"
+        .'Content-Length: '.int($content_length-$range)."\n"
+        .($res eq '206' ? 'Content-Range: bytes '.int($range).'-'.int($content_length-1).'/'.int($content_length) : '')
+        ."Connection: close\n"
+        ."\n"
+    );
     $w_client = EV::io $remote_player_stream->handle, EV::WRITE, sub {
         my ($w, $revents) = @_; # all callbacks receive the watcher and event mask
         app->log->debug('$w_client fired');

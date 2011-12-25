@@ -28,8 +28,7 @@ There is a web frontend using DHTML/WebSocket tech needed to start streaming. St
 MOJO_MODE=development DEBUG=0 morbo mojo_vdr_streamer.pl daemon --listen 'http://*:3001'
 
 Then go to http://your-ip:3001 to select a VDR recording for streaming.
-Then point your client (mplayer) to http://your-ip:3001/playback. It may take a while before
-mplayer starts the playback.
+Then point your client to http://your-ip:3001/playback.
 
 
 
@@ -60,9 +59,15 @@ configuration: --bit-depth=8 --chroma-format=all
 x264 license: GPL version 2 or later
 libswscale/libavformat license: GPL version 2 or later
 
-Client:
+Clients:
 
-Ubuntu 11.04/amd64. mplayer/smplayer. Seeking does not work with other players, unfortunately.
+Ubuntu 11.04/amd64.
+mplayer/smplayer/vlc/pDLNA, best is vlc.
+Seeking works with (s)mplayer and vlc.
+
+pDLNA: https://github.com/geuma/pDLNA
+  pDLNA extended with required externals support: https://github.com/jjYBdx4IL/pDLNA
+
 
 
 

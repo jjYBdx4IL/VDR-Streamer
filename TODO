@@ -3,7 +3,6 @@
 * faster seeks
 * is there any way to tell (s)mplayer about the duration of the stream?
 * is there any way to make smplayer correctly position the lever on the seek bar?
-  * might be a good idea to used correct HTTP 206 answers...
 * pre-re-compress on the server (server-side caching) and display progress in WEB UI
 * support DLNA? (https://github.com/geuma/pDLNA)
   * added externals support to pDLNA (@ https://github.com/jjYBdx4IL/pDLNA), such that
