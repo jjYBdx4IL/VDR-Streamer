@@ -17,9 +17,11 @@ I have an Intel Core i5 750 with 4 cores. A recent ffmpeg requires less than hal
 that processing power for SD TV content.
 
 The streaming server assumes 25 fps and looks at index.vdr to estimate the byte
-length. The HTTP streaming client then seeks by sending an offset (range), which the server
+length of the re-compressed stream -- we are basically faking the re-compressed file and
+create parts of it on-demand. The HTTP streaming client seeks by sending an offset (range), which the server
 translates into a relative position and then restarts re-compression at that translated position
-within the VDR recording (001.vdr etc.).
+within the VDR recording (001.vdr etc.). Of course, the client will not receive exactly the same octets
+when re-reading the same part twice by seeking backwards.
 
 There is a web frontend using DHTML/WebSocket tech needed to start streaming. Start the server with:
 

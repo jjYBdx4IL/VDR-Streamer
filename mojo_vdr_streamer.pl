@@ -27,6 +27,8 @@ use Fcntl qw(:DEFAULT);
 use Symbol qw(gensym);
 use IO::Socket;
 use Data::Dumper;
+use MIME::Base64;
+use File::Slurp;
 require 'Index.pm';
 
 app->log->level($ENV{'DEBUG'} ? 'debug' : 'info');
@@ -36,7 +38,11 @@ my $j = JSON::Any->new(utf8=>1);
 our @recs = ();
 our $recs_last_updated;
 
-our $bufsize = 4096;
+our $do_precache = 1; # pre-read entire file when streaming starts... lets disks go to sleep on systems with big RAM size
+our $precache_pid = undef; # so we are able to abort the pre-caching
+our $w_precache = undef;
+
+our $bufsize = 32768;
 our $tcp_sndbufsize = undef;
 
 our $default_audio_kbit = 112;
@@ -58,11 +64,10 @@ our $w_ffmpeg_stderr = undef;
 our $ffmpeg_stdout_buf = '';
 our $ffmpeg_stdout_buf_stopsize = 2*$bufsize;
 
-our $w_vdr_src = undef;
 our $vdr_src_buf = '';
 our $vdr_src_buf_stopsize = 2*$bufsize; # some sort of approx. read-ahead length
-our $current_vdr_src_fn = undef;
-our $vdr_src_fh = undef;
+our $vdr_src_idx = undef;
+our $vdr_src_last_reported_timepos = -1;
 
 our $w_client = undef;
 our $w_client_read_monitor = undef;
@@ -97,7 +102,7 @@ my $recur_id = Mojo::IOLoop->recurring(3 => sub {
         $/.'    '.'$w_ffmpeg_stdin->is_active='.(!defined($w_ffmpeg_stdin)?'<undef>':$w_ffmpeg_stdin->is_active).
         $/.'    '.'$w_ffmpeg_stdout->is_active='.(!defined($w_ffmpeg_stdout)?'<undef>':$w_ffmpeg_stdout->is_active).
         $/.'    '.'$w_ffmpeg_stderr->is_active='.(!defined($w_ffmpeg_stderr)?'<undef>':$w_ffmpeg_stderr->is_active).
-        $/.'    '.'$w_vdr_src->is_active='.(!defined($w_vdr_src)?'<undef>':$w_vdr_src->is_active).
+#        $/.'    '.'$w_vdr_src->is_active='.(!defined($w_vdr_src)?'<undef>':$w_vdr_src->is_active).
         $/.'    '.'$w_client->is_active='.(!defined($w_client)?'<undef>':$w_client->is_active).
         $/.'    '.'$w_client_read_monitor->is_active='.(!defined($w_client_read_monitor)?'<undef>':$w_client_read_monitor->is_active).
         $/.'    '.'$remote_player_stream='.(!defined($remote_player_stream)?'<undef>':$remote_player_stream).
@@ -145,6 +150,13 @@ sub async_fh {
     fcntl($fh, F_SETFL, $flags | O_NONBLOCK);
 }
 
+sub ws_dist_msg {
+    my ($content) = @_;
+    foreach my $s ( values %ws_clients ) {
+        $s->send_message($j->encode($content));
+    }
+}
+
 # frame=  575 fps= 25 q=24.0 Lq=24.0 size=    6535kB time=00:00:23.25 bitrate=2301.9kbits/s
 sub start_playback {
     my $rec = $current_recording;
@@ -154,6 +166,11 @@ sub start_playback {
     
     return unless (-r $rec.'/index.vdr');
     
+    if($precache_pid) {
+        kill 'TERM', $precache_pid;
+        $precache_pid = undef;
+    }
+    
     if(defined $playback_ffmpeg_pid) {
         kill 'TERM', $playback_ffmpeg_pid;
         $playback_ffmpeg_pid = undef;
@@ -161,7 +178,6 @@ sub start_playback {
     
     $vdr_src_buf = '';
     # avoid races by first cleaning up most stuff
-    undef $w_vdr_src;
     undef $w_ffmpeg_child;
     undef $w_ffmpeg_stdin;
     undef $w_ffmpeg_stdout;
@@ -170,68 +186,77 @@ sub start_playback {
     undef $playback_pipe_ffmpeg_stdin;
     undef $playback_pipe_ffmpeg_stdout;
     undef $playback_pipe_ffmpeg_stderr;
-    undef $vdr_src_fh;
+    undef $vdr_src_idx;
 
     $playback_pipe_ffmpeg_stdin = gensym;
     $playback_pipe_ffmpeg_stdout = gensym;
     $playback_pipe_ffmpeg_stderr = gensym;
-    $vdr_src_fh = gensym;
     
     $ffmpeg_stdout_buf = '';
 
     app->log->info('$w_vdr_src: opening VDR index file '.$rec.'/index.vdr');
-    my $index_vdr = VDR::Index->new($rec.'/index.vdr');
-    my $n_pics = $index_vdr->num_pics;
+    $vdr_src_idx = VDR::Index->new($rec.'/index.vdr')->async(1);
+    my $n_pics = $vdr_src_idx->num_pics;
     app->log->info('$w_vdr_src: number of total frames is '.$n_pics);
-    my $exp_content_length = int(($n_pics / 25.0) * (($audio_kbit+$video_kbit)*$assumed_mux_overhead_factor)*1024/8);
+    my $exp_content_length = int(($n_pics / $vdr_src_idx->fps) * (($audio_kbit+$video_kbit)*$assumed_mux_overhead_factor)*1024/8);
     app->log->info(sprintf('$w_vdr_src: expected output size at %d+%d kbit is %d bytes',$video_kbit,$audio_kbit,$exp_content_length));
     if($offset > $exp_content_length * 0.99) {
         $offset = int($exp_content_length * 0.99);
     }
     my $offset_frame = int($offset / $exp_content_length * $n_pics);
     app->log->info(sprintf('$w_vdr_src: computed offset frame for offset position %d is %d',$offset,$offset_frame));
-    $index_vdr->get_pic_info($offset_frame);
-    $index_vdr->skip_to_frametype(1);
-    app->log->info('$w_vdr_src: skipped to frame '.$index_vdr->picidx.' based on frame type, new src file pos is '.$index_vdr->fileoffset);
-    $current_vdr_src_fn = $index_vdr->filename;
+    $vdr_src_idx->get_pic_info($offset_frame);
+    $vdr_src_idx->skip_to_frametype(1);
+    app->log->info('$w_vdr_src: skipped to frame '.$vdr_src_idx->picidx.' based on frame type, new src file pos is '.$vdr_src_idx->fileoffset);
     
-    app->log->info('$w_vdr_src: opening '.$current_vdr_src_fn);
     
-    sysopen($vdr_src_fh, $current_vdr_src_fn, O_RDONLY | O_NONBLOCK) or die;
-    async_fh($vdr_src_fh);
-    app->log->info('$w_vdr_src: seeking to pos '.$index_vdr->fileoffset);
-    sysseek($vdr_src_fh,$index_vdr->fileoffset,0) or die;
-    $w_vdr_src = EV::io $vdr_src_fh, EV::READ, sub {
-        my ($w, $revents) = @_; # all callbacks receive the watcher and event mask
-        app->log->debug('$w_vdr_src fired');
-        my $buf;
-        my $rlen = sysread($vdr_src_fh,$buf,$bufsize);
-        die $! unless defined $rlen;
+    if($do_precache) {
+        $precache_pid = fork();
+        if(!$precache_pid) {
+            # let the streamer start first
+            sleep 15;
+            open STDOUT, '>/dev/null' or die $!;
+            exec('cat', glob($rec.'/*.vdr'));
+        } else {
+            app->log->info('precache child process created and has pid '.$precache_pid);
+            $w_precache = EV::child $precache_pid, 0, sub {
+                my ($w, $revents) = @_;
+                my $status = $w->rstatus;
+                app->log->info('precache child process terminated with status '.$status);
+                # avoid killing something unrelated:
+                $precache_pid = undef;
+            };
+        }
+    }
+
+
+    $vdr_src_idx->stream_start(sub {
+        my($data) = @_;
+        app->log->debug('$w_vdr_src stream fired');
         
-        # EOF? -> next file!
-        if($rlen == 0) {
-            $current_vdr_src_fn =~ s/(\d+)\.vdr$/sprintf('%03d.vdr',$1+1)/e;
-            undef $vdr_src_fh;
-            $vdr_src_fh = gensym;
-            app->log->info('$w_vdr_src: opening '.$current_vdr_src_fn);
-            sysopen($vdr_src_fh, $current_vdr_src_fn, O_RDONLY | O_NONBLOCK) or die;
-            async_fh($vdr_src_fh);
-            $rlen = sysread($vdr_src_fh,$buf,$bufsize);
-            die $! unless defined $rlen;
+        $vdr_src_buf .= $$data;
+        
+        if($vdr_src_last_reported_timepos != $vdr_src_idx->timepos) {
+            ws_dist_msg({
+                cmd => 'playstatus_update',
+                reply => {
+                    displaypos    => $vdr_src_idx->displaypos,
+                    displaylength => $vdr_src_idx->displaylength,
+                },
+            });
+            $vdr_src_last_reported_timepos = $vdr_src_idx->timepos;
         }
         
-        app->log->debug(sprintf('$w_vdr_src: %d bytes read',$rlen));
-        
-        $vdr_src_buf .= $buf;
         if(bytes::length($vdr_src_buf) >= $vdr_src_buf_stopsize) {
-            app->log->debug('$w_vdr_src suspended') if w_suspend($w_vdr_src);
+            app->log->debug('$w_vdr_src stream suspended') if $vdr_src_idx->stream_suspend;
         }
         
         if(bytes::length($vdr_src_buf) > 0 && !$w_ffmpeg_stdin->is_active) {
             app->log->debug('$w_ffmpeg_stdin resumed') if w_resume($w_ffmpeg_stdin);
         }
         app->log->debug('$w_vdr_src done');
-    };
+        
+    });
 
     # http://sites.google.com/site/linuxencoding/x264-ffmpeg-mapping
     $playback_ffmpeg_pid = open3($playback_pipe_ffmpeg_stdin, $playback_pipe_ffmpeg_stdout, $playback_pipe_ffmpeg_stderr,
@@ -248,6 +273,8 @@ sub start_playback {
         my ($w, $revents) = @_;
         my $status = $w->rstatus;
         app->log->info('ffmpeg child process terminated with status '.$status);
+        # avoid killing something unrelated:
+        $playback_ffmpeg_pid = undef;
     };
     $w_ffmpeg_stdin = EV::io $playback_pipe_ffmpeg_stdin, EV::WRITE, sub {
         my ($w, $revents) = @_; # all callbacks receive the watcher and event mask
@@ -270,7 +297,7 @@ sub start_playback {
         }
         
         if(bytes::length($vdr_src_buf) < $vdr_src_buf_stopsize) {
-            app->log->debug('$w_vdr_src resumed') if w_resume($w_vdr_src);
+            app->log->debug('$w_vdr_src stream resumed') if $vdr_src_idx->stream_resume;
         }
         app->log->debug('$w_ffmpeg_stdin done');
     };
@@ -312,18 +339,124 @@ sub start_playback {
         die $! unless defined $rlen;
         $buf =~ s/[\r\n]+/\n/g;
         app->log->info('ffmpeg stderr: '.$buf);
-        foreach my $s ( values %ws_clients ) {
-            $s->send_message($j->encode({
-                    cmd => 'playstatus_update',
-                    reply => {position=>$buf},
-            }));
-        }
+        ws_dist_msg({
+            cmd => 'playstatus_update',
+            reply => {position=>$buf},
+        });
         app->log->debug('$w_ffmpeg_stderr end');
     };
     app->log->info('ffmpeg child started, pid = '.$playback_ffmpeg_pid);
     $exp_content_length
 }
 
+our %preview_jobs = ();
+sub loadpreviewimages {
+    my($ws,$ival,$cnt,$imgwidth,$cbname,$offset_picidx,$nodata_cb)=@_;
+    my $sendlimit = $cnt;
+    $cnt += 2; # mplayer seems to need some more frames in input... ???
+    my $job = {};
+    if ( exists $preview_jobs{$ws} ) {
+        $job = $preview_jobs{$ws};
+    }
+    if($job->{pid}) {
+        kill 'TERM', $job->{pid};
+        undef $job->{w};
+    }
+    if(!defined $current_recording) {
+        return;
+    }
+
+    my $tmpdir = File::Temp->newdir;
+
+    $job->{ws} = $ws;
+    $job->{pid} = fork();
+    if(!$job->{pid}) {
+        my $idx = VDR::Index->new($current_recording.'/index.vdr');
+        my @pic_idxs = ();
+        my @pic_displaypos = ();
+        my $frameidx = $offset_picidx;
+        #open my $fh, '|-', "ffmpeg -vframes ".quotemeta($cnt)." -f mpeg -i - -s ".quotemeta($imgsize)." -f image2 $tmpdir/\%06d.jpg" or die $!;
+        #open my $fh, '|-', "ffmpeg -f mpeg -i - -s ".quotemeta($imgsize)." -f image2 $tmpdir/\%06d.jpg" or die $!;
+        #open my $fh, '|-', "mplayer -nosound -vf scale=".quotemeta($imgwidth).":-3 -vo jpeg:outdir=".quotemeta($tmpdir)." -" or die $!;
+        open my $fh, '>:raw', "$tmpdir/data" or die $!;
+        binmode($fh) or die;
+        for ( my $i = 0; $i < $cnt; $i++ ) {
+            if($i > 0) {
+                $frameidx += int($ival * $idx->fps);
+            }
+#            app->log->debug('image preview $frameidx '.$frameidx);
+#            print STDERR 'image preview $frameidx '.$frameidx.$/;
+            $idx->get_pic_info($frameidx);
+            $idx->skip_to_frametype(1);
+            push @pic_idxs, $idx->picidx;
+            push @pic_displaypos, $idx->displaypos;
+            my $frame = $idx->get_full_frame();
+#             if($i==0) {
+#                 for(my $j=0; $j<100; $j++) {
+#                     print $fh $frame or die;
+#                 }
+#             }
+            print $fh $frame or die;
+        }
+        close $fh or die $!;
+        system("mplayer -nosound $tmpdir/data -vf scale=".quotemeta($imgwidth).":-3 -vo jpeg:outdir=".quotemeta($tmpdir));
+        #system("ffmpeg -f mpeg -i $tmpdir/data -s 160x120 -f image2 $tmpdir/\%06d.jpg");
+        unlink "$tmpdir/data" or die;
+        my $sent = 0;
+        foreach my $jpg ( sort glob($tmpdir.'/*.jpg') ) {
+            if($sent >= $sendlimit) {
+                unlink $jpg or die;
+                next;
+            }
+            if(! @pic_idxs) {
+                warn "no pic idx, dropping preview image";
+                unlink $jpg or die;
+                next;
+            }
+            rename $jpg, sprintf('%s/%s_%09d.jpg',$tmpdir,shift @pic_displaypos,shift @pic_idxs) or die;
+            $sent++;
+        }
+        exit 0;
+    }
+    $job->{w} = EV::child $job->{pid}, 0, sub {
+        my ($w, $revents) = @_;
+        my $status = $w->rstatus;
+        app->log->info('image preview child process terminated with status '.$status);
+        
+        
+        # http://aktuell.de.selfhtml.org/artikel/grafik/inline-images/
+        
+        my $data_sent = 0;
+        foreach my $jpg ( sort glob($tmpdir.'/*.jpg') ) {
+            app->log->debug('sending base64 encoded preview image '.$jpg);
+            my ( $displaypos, $picidx ) = ( $jpg =~ /\/([^\/]+)_(\d+)\.jpg/i );
+            $picidx =~ s/^0+//;
+            $job->{ws}->send_message($j->encode({
+                cmd => $cbname,
+                reply => {
+                    data => encode_base64(read_file($jpg)),
+                    picidx => $picidx,
+                    displaypos => $displaypos,
+                },
+            }));
+            $data_sent++;
+        }
+        
+        if(!$data_sent && defined($nodata_cb)) {
+            $job->{ws}->send_message($j->encode({
+                cmd => $nodata_cb,
+            }));
+        }
+        
+        # avoid killing something unrelated:
+        $job->{pid} = undef;
+        undef $job->{w};
+        undef $job->{ws};
+        delete $preview_jobs{$ws};
+    };
+    
+    $preview_jobs{$ws} = $job;
+}
 
 any '/' => sub {
     my $self = shift;
@@ -346,6 +479,13 @@ any '/' => sub {
                 reply => {recs=>\@recs,recs_last_updated=>$recs_last_updated},
             });
         }
+        if($msg_in->{cmd} eq 'reload') {
+            load_recs();
+            $msg_out = $j->encode({
+                cmd => 'load',
+                reply => {recs=>\@recs,recs_last_updated=>$recs_last_updated},
+            });
+        }
         if($msg_in->{cmd} eq 'play') {
             $current_recording = $msg_in->{recording};
             start_playback();
@@ -354,13 +494,49 @@ any '/' => sub {
                 reply => {title=>$msg_in->{recording}},
             });
         }
+        if($msg_in->{cmd} eq 'wind') {
+            if ( defined $vdr_src_idx && defined $msg_in->{seconds} ) {
+                my $dest_pic_idx = $vdr_src_idx->picidx + $vdr_src_idx->fps * $msg_in->{seconds};
+                if ( $dest_pic_idx >= $vdr_src_idx->num_pics - $vdr_src_idx->fps * 12 ) {
+                    $dest_pic_idx = $vdr_src_idx->num_pics - $vdr_src_idx->fps * 12 - 1;
+                }
+                if ( $dest_pic_idx < 0 ) {
+                    $dest_pic_idx = 0;
+                }
+                $vdr_src_idx->get_pic_info($dest_pic_idx);
+                $vdr_src_idx->skip_to_frametype(1);
+            }
+        }
+        if($msg_in->{cmd} eq 'seekpic') {
+            if ( defined $vdr_src_idx && defined $msg_in->{picidx} ) {
+                my $dest_pic_idx = $msg_in->{picidx};
+                if ( $dest_pic_idx >= $vdr_src_idx->num_pics - $vdr_src_idx->fps * 12 ) {
+                    $dest_pic_idx = $vdr_src_idx->num_pics - $vdr_src_idx->fps * 12 - 1;
+                }
+                if ( $dest_pic_idx < 0 ) {
+                    $dest_pic_idx = 0;
+                }
+                $vdr_src_idx->get_pic_info($dest_pic_idx);
+                $vdr_src_idx->skip_to_frametype(1);
+            }
+        }
+        if($msg_in->{cmd} eq 'loadpreviewimages') {
+            if(defined $vdr_src_idx) {
+                loadpreviewimages($s,$msg_in->{interval},$msg_in->{count},$msg_in->{imgwidth},'previewimage',$vdr_src_idx->picidx);
+            }
+        }
+        if($msg_in->{cmd} eq 'loadsinglepreviewimage') {
+            if(defined $vdr_src_idx && defined($msg_in->{picidx})) {
+                loadpreviewimages($s,0.1,1,$msg_in->{imgwidth},'singlepreviewimage',$msg_in->{picidx},'singlepreviewimagefail');
+            }
+        }
         if($msg_in->{cmd} eq 'ping') {
             $msg_out = $j->encode({
                 cmd => 'ping',
             });
         }
         if(defined $msg_out) {
-            $self->app->log->info('msg out: '.$msg_out);
+            app->log->info('msg out: '.$msg_out);
             $s->send_message($msg_out);
         }
     }) if $self->tx->is_websocket;
@@ -437,6 +613,7 @@ any '/playback' => sub {
     };
 };
 
+# unfinished, one-stop playback...?
 get '/2play/*' => sub {
     my $self = shift;
     app->log->info($self->req->to_string);
@@ -469,8 +646,11 @@ __DATA__
   </head>
   <body>
     <pre>playback command: (s)mplayer <%= url_for('/playback')->to_abs %></pre>
-    <div id="recs" style="clear:both;" class="dynsec"></div>
-    <div id="ctrl" style="clear:both;" class="dynsec"></div>
+    <div id="reloadbutton" class="icontextbutton">
+        <img src="/icons/refresh.png" alt="refresh">
+        <span>refresh</span>
+    </div>
+    <div id="recs" style="clear:both;"></div>
   </body>
 </html>
 

@@ -18,6 +18,41 @@
     background-color: #9999ff;
 }
 pre.playlog {
+    clear: both;
     height: 80px;
     overflow: scroll;
+}
+div.controls img {
+    margin: 2px 8px;
+    cursor: pointer;
+    vertical-align: middle;
+}
+div.controls span {
+    margin: 2px 8px;
+    font-family: monospace;
+    font-size: 11pt;
+    vertical-align: middle;
+}
+.icontextbutton {
+    float: left;
+    background-color: #e0e0e0;
+    cursor: pointer;
+}
+.icontextbutton img {
+    vertical-align: middle;
+    margin: 2px 4px;
+}
+.icontextbutton span {
+    vertical-align: middle;
+    font-family: monospace;
+    margin: 2px 4px;
+}
+#previewpane {
+    width: 100%;
+}
+#seekstatus img {
+    float: left;
+}
+#seekpos {
+    float: left;
 }
